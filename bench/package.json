@@ -1,0 +1,13 @@
+{
+  "name": "pi-poker-eval-bench",
+  "private": true,
+  "description": "Compares the pi-poker-eval JavaScript build with pokersolver and poker-evaluator.",
+  "license": "MIT",
+  "scripts": {
+    "bench": "node compare.cjs"
+  },
+  "devDependencies": {
+    "poker-evaluator": "2.1.1",
+    "pokersolver": "2.1.4"
+  }
+}

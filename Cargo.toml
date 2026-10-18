@@ -1,0 +1,34 @@
+[package]
+name = "pi-poker-eval"
+version = "0.1.0"
+edition = "2024"
+authors = ["PokerInfra <hello@pokerinfra.com>"]
+description = "Poker hand evaluation for Texas Hold'em and Omaha (PLO, PLO5, PLO6): hand ranking, winners, hand descriptions and equity."
+license = "MIT"
+repository = "https://github.com/pokerinfra/poker-eval"
+homepage = "https://www.pokerinfra.com"
+documentation = "https://docs.rs/pi-poker-eval"
+keywords = ["poker", "holdem", "omaha", "hand-evaluator", "equity"]
+categories = ["game-development", "algorithms"]
+readme = "README.md"
+# Not yet released: guards against an accidental `cargo publish` before the first release.
+publish = false
+
+[lib]
+name = "pi_poker_eval"
+# rlib for Rust users; cdylib for the WebAssembly build.
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+serde-wasm-bindgen = { version = "0.6.5", optional = true }
+wasm-bindgen = { version = "0.2.129", optional = true }
+
+[features]
+# The JavaScript/TypeScript bindings. Off by default: Rust users get no extra dependencies.
+wasm = ["dep:wasm-bindgen", "dep:serde", "dep:serde-wasm-bindgen"]
+
+[profile.release]
+# Smaller WebAssembly download, same speed.
+lto = true
+codegen-units = 1
