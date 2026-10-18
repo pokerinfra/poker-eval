@@ -16,6 +16,7 @@ const p = JSON.parse(fs.readFileSync("pkg/package.json", "utf8"));
 p.author = { name: "PokerInfra", url: "https://www.pokerinfra.com" };
 p.contributors = [{ name: "Vikas Sood", url: "https://github.com/vikassood11" }];
 p.bugs = { url: "https://github.com/pokerinfra/poker-eval/issues" };
+p.repository = { type: "git", url: "git+https://github.com/pokerinfra/poker-eval.git" };
 p.main = "index.cjs";
 p.types = "index.d.ts";
 p.files = ["index.cjs", "index.d.ts", "pi_poker_eval.js", "pi_poker_eval_bg.wasm"];
