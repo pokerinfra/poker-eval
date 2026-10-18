@@ -2,7 +2,7 @@
 name = "pi-poker-eval"
 version = "0.1.0"
 edition = "2024"
-authors = ["PokerInfra <hello@pokerinfra.com>"]
+authors = ["PokerInfra (https://www.pokerinfra.com)", "Vikas Sood (https://github.com/vikassood11)"]
 description = "Poker hand evaluation for Texas Hold'em and Omaha (PLO, PLO5, PLO6): hand ranking, winners, hand descriptions and equity."
 license = "MIT"
 repository = "https://github.com/pokerinfra/poker-eval"
@@ -11,8 +11,8 @@ documentation = "https://docs.rs/pi-poker-eval"
 keywords = ["poker", "holdem", "omaha", "hand-evaluator", "equity"]
 categories = ["game-development", "algorithms"]
 readme = "README.md"
-# Not yet released: guards against an accidental `cargo publish` before the first release.
-publish = false
+# What goes into the published crate: Rust sources, tests, examples and docs.
+include = ["/src/**/*.rs", "/tests/**/*.rs", "/examples/**/*.rs", "/README.md", "/LICENSE"]
 
 [lib]
 name = "pi_poker_eval"
