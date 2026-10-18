@@ -1,13 +1,7 @@
 // Compile-only check that the generated TypeScript types are usable and strict.
 // Run: tsc --noEmit --strict js-test/types-check.ts
 
-import {
-    evaluate,
-    showdown,
-    type EvaluatedHand,
-    type Showdown,
-    type Variant,
-} from "../pkg/pi_poker_eval";
+import { evaluate, showdown, type EvaluatedHand, type Showdown, type Variant } from "../pkg";
 
 const variant: Variant = "PLO";
 const hand: EvaluatedHand = evaluate(variant, ["Ah", "Ad", "Kc", "Qs"], []);
@@ -29,7 +23,7 @@ evaluate("PLO7", ["Ah", "Kh"], []);
 
 export { strength, cards, winners };
 
-import { equity, runoutCount, type EquityResult } from "../pkg/pi_poker_eval";
+import { equity, runoutCount, type EquityResult } from "../pkg";
 const eq: EquityResult = equity({
     variant: "NLH",
     players: [["Ah", "As"], []],

@@ -3,7 +3,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { evaluate, showdown } = require("../pkg/pi_poker_eval.js");
+const { evaluate, showdown } = require("../pkg");
 
 test("evaluate returns a plain object with every field", () => {
     const hand = evaluate("PLO", ["Tc", "9c", "Qc", "Ac"], ["3c", "5h", "6c", "9s", "7c"]);
@@ -80,7 +80,7 @@ test("errors are thrown with the library's message", () => {
 });
 
 // ---- Equity ----
-const { equity, runoutCount } = require("../pkg/pi_poker_eval.js");
+const { equity, runoutCount } = require("../pkg");
 
 test("equity: exact AhAs vs KdKc preflop matches the independent count", () => {
     const r = equity({
@@ -156,5 +156,70 @@ test("equity: invalid requests throw", () => {
     assert.throws(
         () => equity({ variant: "NLH", players: [], board: [], method: { type: "exact" } }),
         { message: "no players given" },
+    );
+});
+
+// ---- Exchange-buffer plumbing ----
+
+test("oversized requests get the library's own message", () => {
+    const many = Array.from(
+        { length: 20 },
+        (_, i) =>
+            [
+                "2c",
+                "3c",
+                "4c",
+                "5c",
+                "6c",
+                "7c",
+                "8c",
+                "9c",
+                "Tc",
+                "Jc",
+                "Qc",
+                "Kc",
+                "Ac",
+                "2d",
+                "3d",
+                "4d",
+                "5d",
+                "6d",
+                "7d",
+                "8d",
+            ][i],
+    );
+    assert.throws(() => evaluate("NLH", many, []), { message: "NLH needs 2 hole cards, got 20" });
+});
+
+test("results stay correct after WebAssembly memory grows", () => {
+    const before = evaluate("PLO", ["Tc", "9c", "Qc", "Ac"], ["3c", "5h", "6c", "9s", "7c"]);
+    // A large exact calculation allocates inside WebAssembly and can grow its memory.
+    equity({
+        variant: "NLH",
+        players: [
+            ["Ah", "As"],
+            ["Kd", "Kc"],
+            ["Qh", "Qs"],
+        ],
+        board: [],
+        method: { type: "exact" },
+    });
+    const after = evaluate("PLO", ["Tc", "9c", "Qc", "Ac"], ["3c", "5h", "6c", "9s", "7c"]);
+    assert.deepEqual(after, before);
+});
+
+test("the largest showdown: 22 Hold'em players", () => {
+    const ranks = "23456789TJQKA";
+    const deck = [...ranks].flatMap((r) => ["c", "d", "h", "s"].map((s) => r + s));
+    const holes = Array.from({ length: 22 }, (_, p) => [deck[2 * p], deck[2 * p + 1]]);
+    const board = deck.slice(44, 49);
+    const result = showdown("NLH", board, holes);
+    assert.equal(result.hands.length, 22);
+    // Every hand matches evaluating that player on their own.
+    holes.forEach((hole, i) => assert.deepEqual(result.hands[i], evaluate("NLH", hole, board)));
+    const best = Math.max(...result.hands.map((h) => h.strength));
+    assert.deepEqual(
+        result.winners,
+        result.hands.flatMap((h, i) => (h.strength === best ? [i] : [])),
     );
 });

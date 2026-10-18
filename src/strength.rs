@@ -88,6 +88,13 @@ impl HandStrength {
         )
     }
 
+    /// A strength from its raw value (as returned by [`HandStrength::value`]),
+    /// if the value has a valid category.
+    pub fn from_value(value: u32) -> Option<HandStrength> {
+        let category = value >> 20;
+        ((1..=9).contains(&category) && value < (10 << 20)).then_some(HandStrength(value))
+    }
+
     /// The raw comparable value, e.g. for storage or for crossing into JavaScript.
     pub const fn value(self) -> u32 {
         self.0

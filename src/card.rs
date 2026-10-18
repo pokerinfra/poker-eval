@@ -114,6 +114,17 @@ impl Card {
         (self.rank as u8 - 2) * 4 + self.suit as u8
     }
 
+    /// The card with index `index` (0–51, as returned by [`Card::index`]), if valid.
+    pub const fn from_index(index: u8) -> Option<Card> {
+        if index > 51 {
+            return None;
+        }
+        Some(Card {
+            rank: Rank::ALL[(index / 4) as usize],
+            suit: Suit::ALL[(index % 4) as usize],
+        })
+    }
+
     /// Parses a space-separated list such as `"Ah Kd Tc"`.
     pub fn parse_list(text: &str) -> Result<Vec<Card>, EvalError> {
         text.split_whitespace().map(str::parse).collect()
@@ -233,5 +244,13 @@ mod tests {
             }
         }
         assert!(seen.iter().all(|&s| s));
+    }
+
+    #[test]
+    fn from_index_round_trips() {
+        for i in 0..52u8 {
+            assert_eq!(Card::from_index(i).unwrap().index(), i);
+        }
+        assert_eq!(Card::from_index(52), None);
     }
 }

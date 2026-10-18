@@ -4,7 +4,7 @@
 // Run (after scripts/build-js.sh):
 //   cd bench && npm install && node compare.cjs
 
-const pi = require("../pkg/pi_poker_eval.js");
+const pi = require("../pkg");
 const { Hand } = require("pokersolver");
 const PE = require("poker-evaluator");
 
@@ -159,5 +159,5 @@ for (const r of results) {
     );
 }
 console.log(
-    `\n  memory: RSS ${(process.memoryUsage().rss / 1e6).toFixed(0)} MB (poker-evaluator loads a 130 MB table; pi-poker-eval's WebAssembly is ~94 KB)`,
+    `\n  memory: RSS ${(process.memoryUsage().rss / 1e6).toFixed(0)} MB (poker-evaluator loads a 130 MB table; pi-poker-eval's WebAssembly is ~130 KB)`,
 );

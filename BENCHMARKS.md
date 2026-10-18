@@ -27,15 +27,15 @@ The same hands, called from Node. For Omaha, pokersolver ranks every 2+3 combina
 
 | Call | pokersolver | poker-evaluator | pi-poker-eval | vs pokersolver | vs poker-evaluator |
 |---|---|---|---|---|---|
-| Hold'em, one hand | 14.2 µs | 0.86 µs | 4.14 µs | **3.4× faster** | 0.2× (slower) |
-| PLO, one hand | 771 µs | 70.8 µs | 8.15 µs | **95× faster** | **8.7× faster** |
-| PLO6, one hand | 1,949 µs | 173 µs | 13.7 µs | **142× faster** | **12.6× faster** |
-| Hold'em showdown, 6 players | 85.4 µs | 5.62 µs | 19.4 µs | **4.4× faster** | 0.3× (slower) |
-| PLO showdown, 6 players | 4,616 µs | 415 µs | 42.4 µs | **109× faster** | **9.8× faster** |
+| Hold'em, one hand | 14.4 µs | 0.85 µs | **0.66 µs** | **22× faster** | **1.3× faster** |
+| PLO, one hand | 778 µs | 72.6 µs | **4.27 µs** | **182× faster** | **17× faster** |
+| PLO6, one hand | 1,958 µs | 174 µs | **9.27 µs** | **211× faster** | **19× faster** |
+| Hold'em showdown, 6 players | 87.6 µs | 5.72 µs | **3.56 µs** | **25× faster** | **1.6× faster** |
+| PLO showdown, 6 players | 4,708 µs | 426 µs | **24.4 µs** | **193× faster** | **17× faster** |
 
 **Memory:** the pi-poker-eval WebAssembly file is about 130 KB. poker-evaluator loads a 130 MB lookup table.
 
-**Why Hold'em is slower than poker-evaluator from JavaScript:** about 4 µs of each call goes on passing data between JavaScript and WebAssembly (card strings in, a result object with a description and five card strings out). The evaluation itself takes 144 ns. Making this crossing cheaper, without changing the API, is planned before the first release.
+**How the JavaScript calls stay cheap:** card strings are turned into card numbers in JavaScript and written straight into a fixed buffer inside WebAssembly memory; the result comes back the same way and is turned into an object in JavaScript. Each call passes only a few numbers across, with no allocation or copying in between. Descriptions are cached by hand strength, so each is fetched from WebAssembly only once.
 
 ## Equity
 

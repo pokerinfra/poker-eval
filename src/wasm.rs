@@ -1,168 +1,192 @@
-//! JavaScript / TypeScript bindings (feature `wasm`).
+//! Low-level WebAssembly exports (feature `wasm`).
 //!
-//! A thin layer over the Rust API, mirroring it one-to-one: cards are strings
-//! (`"Ah"`, `"Td"`, `"10d"`), variants are the short codes (`"NLH"`, `"PLO"`,
-//! `"PLO5"`, `"PLO6"`), results are plain objects and errors are thrown as
-//! `Error` with the library's message.
+//! These are internal: the npm package's public API is `js/index.cjs`, which
+//! converts card strings to card indices (0–51) and back, and builds the result
+//! objects on the JavaScript side. Passing one small numeric array each way,
+//! instead of many strings and object fields, keeps the cost of crossing
+//! between JavaScript and WebAssembly low.
+
+use std::cell::{RefCell, UnsafeCell};
 
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use crate::{
     Card, Equity, EquityCalculator, EquityMethod, EquityRequest, EvalError, EvaluatedHand,
-    Evaluator, HandEvaluator, Variant,
+    Evaluator, HandEvaluator, HandStrength, Rank, Suit, Variant,
 };
 
-#[wasm_bindgen(typescript_custom_section)]
-const TS_TYPES: &str = r#"
-/** A game variant: Texas Hold'em or Omaha with 4, 5 or 6 hole cards. */
-export type Variant = "NLH" | "PLO" | "PLO5" | "PLO6";
+// ---------------------------------------------------------------------------
+// Hand evaluation through fixed exchange buffers
+// ---------------------------------------------------------------------------
 
-/** The type of a poker hand, weakest first. */
-export type Category =
-    | "High Card" | "Pair" | "Two Pair" | "Three of a Kind" | "Straight"
-    | "Flush" | "Full House" | "Four of a Kind" | "Straight Flush";
+const INPUT_LEN: usize = 512;
+const OUTPUT_LEN: usize = 512;
 
-/** A player's best hand. */
-export interface EvaluatedHand {
-    /** Comparable strength: higher wins, equal is a tie. */
-    strength: number;
-    category: Category;
-    /** Same as `category`; kept for readability at call sites. */
-    name: Category;
-    /** e.g. "Flush, A High", "Two Pair, K's & 4's", "Royal Flush". */
-    description: string;
-    /**
-     * The best five cards (fewer on a short hand), in display order,
-     * e.g. ["Ac", "Qc", "7c", "6c", "3c"].
-     */
-    cards: string[];
+/// Fixed exchange buffers in WebAssembly memory. JavaScript writes card indices
+/// into `input` and reads results from `output`, so an evaluation allocates
+/// nothing and copies nothing through the generated glue.
+struct Exchange {
+    input: UnsafeCell<[u8; INPUT_LEN]>,
+    output: UnsafeCell<[u32; OUTPUT_LEN]>,
 }
 
-/** How to calculate equity. */
-export type EquityMethod =
-    /** Every possible run-out. */
-    | { type: "exact" }
-    /** `trials` random run-outs; the same seed always gives the same answer. */
-    | { type: "monteCarlo"; trials: number; seed: number }
-    /** Exact when there are at most `maxExact` run-outs, otherwise Monte Carlo. */
-    | { type: "auto"; maxExact: number; trials: number; seed: number };
+// SAFETY: WebAssembly here runs on a single thread, and the buffers are only
+// touched inside `exchange`, one call at a time.
+unsafe impl Sync for Exchange {}
 
-/** What to calculate equity for. */
-export interface EquityRequest {
-    variant: Variant;
-    /** Each player's hole cards; an empty array is an unknown opponent (random hand). */
-    players: string[][];
-    /** Known board cards: 0, 3, 4 or 5. */
-    board: string[];
-    /** Cards known to be out of play. Optional. */
-    dead?: string[];
-    method: EquityMethod;
+static EXCHANGE: Exchange = Exchange {
+    input: UnsafeCell::new([0; INPUT_LEN]),
+    output: UnsafeCell::new([0; OUTPUT_LEN]),
+};
+
+thread_local! {
+    static LAST_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
-/** One player's result; each value is a fraction from 0 to 1. */
-export interface PlayerEquity {
-    /** Won outright. */
-    win: number;
-    /** Shared the pot. */
-    tie: number;
-    /** Average share of the pot: wins plus the player's share of splits. */
-    equity: number;
+/// Internal. The WebAssembly memory the exchange buffers live in.
+#[wasm_bindgen(js_name = _memory)]
+pub fn memory() -> JsValue {
+    wasm_bindgen::memory()
 }
 
-export interface EquityResult {
-    /** Same order as the request's players. */
-    players: PlayerEquity[];
-    /** How many run-outs were evaluated. */
-    runouts: number;
-    /** true if every run-out was evaluated, false for Monte Carlo. */
-    exact: boolean;
+/// Internal. `[input address, input bytes, output address, output u32 slots]`.
+#[wasm_bindgen(js_name = _exchange)]
+pub fn exchange_layout() -> Vec<u32> {
+    vec![
+        EXCHANGE.input.get() as u32,
+        INPUT_LEN as u32,
+        EXCHANGE.output.get() as u32,
+        OUTPUT_LEN as u32,
+    ]
 }
 
-/** Every player's best hand at showdown, and who wins. */
-export interface Showdown {
-    /** Same order as the hole cards passed in. */
-    hands: EvaluatedHand[];
-    /** Indices of the winners, lowest first. More than one means a split pot. */
-    winners: number[];
-}
-"#;
-
-#[derive(Serialize)]
-struct JsHand {
-    strength: u32,
-    category: &'static str,
-    name: &'static str,
-    description: String,
-    cards: Vec<String>,
+/// Internal. The message of the last failed call (one that returned 0).
+#[wasm_bindgen(js_name = _lastError)]
+pub fn last_error() -> String {
+    LAST_ERROR.with(|e| e.borrow().clone())
 }
 
-impl From<&EvaluatedHand> for JsHand {
-    fn from(hand: &EvaluatedHand) -> JsHand {
-        JsHand {
-            strength: hand.strength.value(),
-            category: hand.category.name(),
-            name: hand.name(),
-            description: hand.description(),
-            cards: hand.cards.iter().map(Card::to_string).collect(),
+/// Internal. Input: `hole_len` hole cards then `board_len` board cards.
+/// Output: `[strength, n, card₁ … cardₙ]`. Returns the number of output slots, or 0 on error.
+#[wasm_bindgen(js_name = _evaluate)]
+pub fn evaluate_exchange(variant: u8, hole_len: usize, board_len: usize) -> usize {
+    exchange(|input, output| {
+        // Generous room, so oversized requests still reach the evaluator and get
+        // its own message (e.g. "NLH needs 2 hole cards, got 20").
+        const MAX_CARDS: usize = 64;
+        let n = hole_len + board_len;
+        if n > MAX_CARDS {
+            return Err("too many cards".to_string());
+        }
+        let mut cards = [Card::new(Rank::Two, Suit::Clubs); MAX_CARDS];
+        decode(&input[..n], &mut cards[..n])?;
+        let hand = Evaluator
+            .evaluate(
+                variant_from_code(variant)?,
+                &cards[..hole_len],
+                &cards[hole_len..n],
+            )
+            .map_err(|e| e.to_string())?;
+        let mut at = 0;
+        write_hand(output, &mut at, &hand);
+        Ok(at)
+    })
+}
+
+/// Internal. Input: `board_len` board cards, then `players` hole-card counts,
+/// then every player's hole cards back to back. Output:
+/// `[w, winner₁ … winner_w, then per player: strength, n, card₁ … cardₙ]`.
+/// Returns the number of output slots, or 0 on error.
+#[wasm_bindgen(js_name = _showdown)]
+pub fn showdown_exchange(variant: u8, board_len: usize, players: usize) -> usize {
+    exchange(|input, output| {
+        let counts = input
+            .get(board_len..board_len + players)
+            .ok_or("too many players")?;
+        let total: usize = counts.iter().map(|&c| c as usize).sum();
+        let start = board_len + players;
+        if start + total > INPUT_LEN || 1 + players * 8 > OUTPUT_LEN {
+            return Err("too many players or cards".to_string());
+        }
+        let mut cards = vec![Card::new(Rank::Two, Suit::Clubs); board_len + total];
+        decode(&input[..board_len], &mut cards[..board_len])?;
+        decode(&input[start..start + total], &mut cards[board_len..])?;
+        let (board, all_holes) = cards.split_at(board_len);
+
+        let mut holes: Vec<&[Card]> = Vec::with_capacity(players);
+        let mut from = 0;
+        for &count in counts {
+            holes.push(&all_holes[from..from + count as usize]);
+            from += count as usize;
+        }
+        let result = Evaluator
+            .showdown(variant_from_code(variant)?, board, &holes)
+            .map_err(|e| e.to_string())?;
+
+        output[0] = result.winners.len() as u32;
+        for (i, &w) in result.winners.iter().enumerate() {
+            output[1 + i] = w as u32;
+        }
+        let mut at = 1 + result.winners.len();
+        for hand in &result.hands {
+            write_hand(output, &mut at, hand);
+        }
+        Ok(at)
+    })
+}
+
+/// Internal. The description of a hand strength, e.g. `"Flush, A High"`.
+#[wasm_bindgen(js_name = _describe)]
+pub fn describe_strength(strength: u32) -> Result<String, JsError> {
+    HandStrength::from_value(strength)
+        .map(crate::describe::description)
+        .ok_or_else(|| JsError::new("invalid hand strength"))
+}
+
+/// Runs `call` with the exchange buffers; on error records the message and returns 0.
+fn exchange(call: impl FnOnce(&[u8], &mut [u32]) -> Result<usize, String>) -> usize {
+    // SAFETY: single-threaded, and no other reference to the buffers is alive
+    // while `call` runs (nothing it calls touches EXCHANGE).
+    let (input, output) = unsafe { (&*EXCHANGE.input.get(), &mut *EXCHANGE.output.get()) };
+    match call(input, output) {
+        Ok(slots) => slots,
+        Err(message) => {
+            LAST_ERROR.with(|e| *e.borrow_mut() = message);
+            0
         }
     }
 }
 
-#[derive(Serialize)]
-struct JsShowdown {
-    hands: Vec<JsHand>,
-    winners: Vec<usize>,
+fn write_hand(output: &mut [u32], at: &mut usize, hand: &EvaluatedHand) {
+    output[*at] = hand.strength.value();
+    output[*at + 1] = hand.cards.len() as u32;
+    for (i, card) in hand.cards.iter().enumerate() {
+        output[*at + 2 + i] = card.index() as u32;
+    }
+    *at += 2 + hand.cards.len();
 }
 
-/// The best hand `hole` can make with `board`.
-///
-/// @param variant - "NLH", "PLO", "PLO5" or "PLO6"
-/// @param hole - the player's hole cards, e.g. ["Ah", "Kd"]
-/// @param board - 0, 3, 4 or 5 board cards
-/// @throws Error on an invalid card, variant, duplicate card or wrong card count
-#[wasm_bindgen(unchecked_return_type = "EvaluatedHand")]
-pub fn evaluate(
-    #[wasm_bindgen(unchecked_param_type = "Variant")] variant: &str,
-    hole: Vec<String>,
-    board: Vec<String>,
-) -> Result<JsValue, JsError> {
-    let variant = parse_variant(variant)?;
-    let hand = Evaluator
-        .evaluate(variant, &parse_cards(&hole)?, &parse_cards(&board)?)
-        .map_err(js_error)?;
-    to_js(&JsHand::from(&hand))
+fn decode(indices: &[u8], cards: &mut [Card]) -> Result<(), String> {
+    for (slot, &index) in cards.iter_mut().zip(indices) {
+        *slot = Card::from_index(index).ok_or("invalid card index")?;
+    }
+    Ok(())
 }
 
-/// Every player's best hand with the shared `board`, plus the winners.
-///
-/// @param variant - "NLH", "PLO", "PLO5" or "PLO6"
-/// @param board - 0, 3, 4 or 5 board cards
-/// @param holes - each player's hole cards, e.g. [["Ah","Kd"], ["Qc","Qs"]]
-/// @throws Error on an invalid card, variant, duplicate card or wrong card count
-#[wasm_bindgen(unchecked_return_type = "Showdown")]
-pub fn showdown(
-    #[wasm_bindgen(unchecked_param_type = "Variant")] variant: &str,
-    board: Vec<String>,
-    #[wasm_bindgen(unchecked_param_type = "string[][]")] holes: JsValue,
-) -> Result<JsValue, JsError> {
-    let variant = parse_variant(variant)?;
-    let holes: Vec<Vec<String>> = serde_wasm_bindgen::from_value(holes)
-        .map_err(|_| JsError::new("holes must be an array of arrays of card strings"))?;
-    let holes = holes
-        .iter()
-        .map(|h| parse_cards(h))
-        .collect::<Result<Vec<_>, _>>()?;
-    let refs: Vec<&[Card]> = holes.iter().map(Vec::as_slice).collect();
-
-    let result = Evaluator
-        .showdown(variant, &parse_cards(&board)?, &refs)
-        .map_err(js_error)?;
-    to_js(&JsShowdown {
-        hands: result.hands.iter().map(JsHand::from).collect(),
-        winners: result.winners,
-    })
+fn variant_from_code(code: u8) -> Result<Variant, String> {
+    match code {
+        0 => Ok(Variant::Holdem),
+        1 => Ok(Variant::Omaha4),
+        2 => Ok(Variant::Omaha5),
+        3 => Ok(Variant::Omaha6),
+        _ => Err("invalid variant code".to_string()),
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Equity (one call per request; the computation dwarfs the crossing cost)
+// ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
@@ -233,15 +257,9 @@ fn to_request(value: JsValue) -> Result<EquityRequest, JsError> {
     })
 }
 
-/// How often each player wins: exact over every run-out, or seeded Monte Carlo.
-///
-/// @param request - variant, players (an empty array is a random opponent), board,
-///   optional dead cards, and method
-/// @throws Error on an invalid request, card, duplicate, or too many unknown cards
-#[wasm_bindgen(unchecked_return_type = "EquityResult")]
-pub fn equity(
-    #[wasm_bindgen(unchecked_param_type = "EquityRequest")] request: JsValue,
-) -> Result<JsValue, JsError> {
+/// Internal. Equity for a request object (see `EquityRequest` in js/index.d.ts).
+#[wasm_bindgen(js_name = _equity)]
+pub fn equity(request: JsValue) -> Result<JsValue, JsError> {
     let result = Equity.equity(&to_request(request)?).map_err(js_error)?;
     to_js(&JsEquityResult {
         players: result
@@ -258,13 +276,9 @@ pub fn equity(
     })
 }
 
-/// How many run-outs an exact calculation would evaluate (beyond 2^53 the number is approximate).
-///
-/// @param request - the same shape as for `equity`; `method` is ignored
-#[wasm_bindgen(js_name = runoutCount)]
-pub fn runout_count(
-    #[wasm_bindgen(unchecked_param_type = "EquityRequest")] request: JsValue,
-) -> Result<f64, JsError> {
+/// Internal. Run-out count for a request object (beyond 2^53 the number is approximate).
+#[wasm_bindgen(js_name = _runoutCount)]
+pub fn runout_count(request: JsValue) -> Result<f64, JsError> {
     Ok(Equity
         .runout_count(&to_request(request)?)
         .map_err(js_error)? as f64)
